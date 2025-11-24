@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CS:GO 简易定位训练器</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #1e1e1e; /* CSGO风格深灰背景 */
+            color: white;
+            font-family: 'Arial', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            user-select: none; /*哪怕点偏了也不要选中文字*/
+        }
+        #game-area {
+            position: relative;
+            width: 800px;
+            height: 600px;
+            background-color: #000;
+            border: 2px solid #4a4a4a;
+            cursor: crosshair; /* 鼠标变成十字准星 */
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        .target {
+            position: absolute;
+            width: 40px; /* 目标大小，模拟远距离头部 */
+            height: 40px;
+            background-color: #ff4757; /* 醒目的红色 */
+            border-radius: 50%;
+            cursor: crosshair;
+            transition: transform 0.1s; /* 点击时的动画 */
+        }
+        .target:active {
+            transform: scale(0.9);
+        }
+        #ui-layer {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 30px;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        button {
+            padding: 10px 30px;
+            font-size: 18px;
+            background-color: #e67e22;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+        }
+        button:hover { background-color: #d35400; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div>得分: <span id="score">0</span></div>
+        <div>时间: <span id="time">30</span>s</div>
+    </div>
+
+    <div id="game-area" onclick="missShot(event)">
+        <div id="start-screen" style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); text-align:center;">
+            <h1 style="margin:0 0 20px 0;">CS:GO REFLEX</h1>
+            <button onclick="startGame(event)">开始训练 (RUSH B!)</button>
+        </div>
+    </div>
+
+    <script>
+        let score = 0;
+        let timeLeft = 30;
+        let gameActive = false;
+        let gameArea = document.getElementById('game-area');
+        let timerInterval;
+
+        // 游戏开始
+        function startGame(e) {
+            e.stopPropagation(); // 防止触发missShot
+            score = 0;
+            timeLeft = 30;
+            document.getElementById('score').innerText = score;
+            document.getElementById('time').innerText = timeLeft;
+            document.getElementById('start-screen').style.display = 'none';
+            gameActive = true;
+            
+            spawnTarget();
+            
+            // 倒计时逻辑
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                document.getElementById('time').innerText = timeLeft;
+                if(timeLeft <= 0) {
+                    endGame();
+                }
+            }, 1000);
+        }
+
+        // 生成目标
+        function spawnTarget() {
+            if(!gameActive) return;
+
+            // 移除旧目标
+            let oldTarget = document.querySelector('.target');
+            if(oldTarget) oldTarget.remove();
+
+            let target = document.createElement('div');
+            target.className = 'target';
+            
+            // 随机位置 (减去目标本身的宽高，防止出界)
+            let x = Math.random() * (800 - 40);
+            let y = Math.random() * (600 - 40);
+            
+            target.style.left = x + 'px';
+            target.style.top = y + 'px';
+            
+            // 点击目标事件
+            target.onmousedown = function(e) {
+                e.stopPropagation(); // 防止冒泡给背景
+                score++;
+                document.getElementById('score').innerText = score;
+                // 播放一个简单的点击音效（可选）
+                spawnTarget(); // 生成下一个
+            };
+
+            gameArea.appendChild(target);
+        }
+
+        // 点空了（马枪检测）
+        function missShot(e) {
+            if(!gameActive) return;
+            // 这里以后可以扣分或者记录命中率
+            console.log("马枪了！");
+        }
+
+        // 游戏结束
+        function endGame() {
+            gameActive = false;
+            clearInterval(timerInterval);
+            document.querySelector('.target').remove();
+            
+            let kps = (score / 30).toFixed(2); // 每秒击杀数
+            
+            let startScreen = document.getElementById('start-screen');
+            startScreen.style.display = 'block';
+            startScreen.innerHTML = `
+                <h1>训练结束</h1>
+                <p>最终得分: ${score}</p>
+                <p style="color:#e67e22">KPS: ${kps}</p>
+                <button onclick="startGame(event)">再来一把</button>
+            `;
+        }
+    </script>
+</body>
+</html>
