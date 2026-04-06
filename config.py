@@ -35,9 +35,11 @@ class AppConfig:
     image_format: str = "jpg"
     handshake_enabled: bool = False
     connect_on_startup: bool = False
+    serial_connect_retry_sec: float = 2.0
 
     stable_frames_required: int = 3
     switch_cooldown_sec: float = 0.8
+    idle_resend_sec: float = 2.5
     map_name: str = "DE_DUST2"
     team_name: str = "T"
 

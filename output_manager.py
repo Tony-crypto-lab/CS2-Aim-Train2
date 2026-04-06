@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 from detector import DetectionResult, TutorialImageCache
@@ -20,6 +19,7 @@ class OutputManagerConfig:
     switch_cooldown_sec: float = 0.8
     map_name: str = "DE_DUST2"
     team_name: str = "T"
+    idle_resend_sec: float = 2.5
 
 
 class OutputManager:
@@ -41,10 +41,12 @@ class OutputManager:
         self._last_switch_time = 0.0
 
         self._last_lineup_info: Optional[dict] = None
+        self._last_idle_status = ""
+        self._last_idle_send_time = 0.0
 
     def initialize(self) -> bool:
         ok = self.backend.initialize()
-        self.show_idle(status="INIT")
+        self.show_idle(status="INIT", force=True)
         return ok
 
     def update_from_detection(self, result: Optional[DetectionResult]) -> None:
@@ -89,9 +91,16 @@ class OutputManager:
         self._last_switch_time = now
         self._last_lineup_info = lineup_info
 
-    def show_idle(self, status: str = "WAITING") -> None:
+    def show_idle(self, status: str = "WAITING", force: bool = False) -> None:
+        now = time.monotonic()
+        if not force:
+            if status == self._last_idle_status and (now - self._last_idle_send_time) < self.cfg.idle_resend_sec:
+                return
+
         image = self.renderer.render_idle_screen(self.cfg.map_name, "HUD", status)
         self.backend.show_idle(image, status)
+        self._last_idle_status = status
+        self._last_idle_send_time = now
 
     def send_test_pattern(self) -> None:
         image = self.renderer.render_test_pattern()

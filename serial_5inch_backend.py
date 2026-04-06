@@ -5,7 +5,6 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Optional
 
 import cv2
@@ -31,6 +30,7 @@ class Serial5InchConfig:
     image_format: str = "jpg"
     handshake_enabled: bool = False
     connect_on_startup: bool = False
+    connect_retry_sec: float = 2.0
 
 
 class Serial5InchBackend(OutputBackend):
@@ -47,6 +47,10 @@ class Serial5InchBackend(OutputBackend):
         self._current_payload: Optional[bytes] = None
         self._current_hash = ""
 
+        self._last_enqueued_hash = ""
+        self._next_connect_allowed = 0.0
+        self._last_error_signature = ""
+
         self.last_send_result = "idle"
         self.last_error = ""
         self.connected = False
@@ -57,15 +61,21 @@ class Serial5InchBackend(OutputBackend):
         self._thread = threading.Thread(target=self._send_loop, name="serial-5inch-sender", daemon=True)
         self._thread.start()
         if self.cfg.connect_on_startup:
-            return self.connect()
+            return self.connect(force=True)
         return True
 
-    def connect(self) -> bool:
+    def connect(self, force: bool = False) -> bool:
+        now = time.monotonic()
+        if not force and now < self._next_connect_allowed:
+            self.last_send_result = "connect_backoff"
+            return False
+
         port = self.cfg.serial_port or self._auto_detect_port()
         if not port:
             self.connected = False
             self.last_error = "No serial port found"
             self.last_send_result = "connect_failed"
+            self._next_connect_allowed = now + self.cfg.connect_retry_sec
             return False
 
         try:
@@ -79,19 +89,20 @@ class Serial5InchBackend(OutputBackend):
             self.connected = True
             self.last_error = ""
             self.last_send_result = f"connected:{port}"
+            self._next_connect_allowed = 0.0
             LOGGER.info("Connected serial port %s", port)
             return True
         except Exception as exc:
             self.connected = False
             self.last_error = str(exc)
             self.last_send_result = "connect_failed"
-            LOGGER.exception("Failed to connect serial backend")
+            self._next_connect_allowed = now + self.cfg.connect_retry_sec
+            self._log_connect_error_once(exc, port)
             return False
 
     def reconnect(self) -> bool:
         self.disconnect()
-        time.sleep(0.2)
-        return self.connect()
+        return self.connect(force=True)
 
     def disconnect(self) -> None:
         if self.serial_client is not None:
@@ -137,6 +148,7 @@ class Serial5InchBackend(OutputBackend):
             "last_error": self.last_error,
             "send_only_on_change": self.cfg.send_only_on_change,
             "send_events": self.send_events,
+            "next_connect_in": max(0.0, self._next_connect_allowed - time.monotonic()),
         }
 
     def _enqueue_image(self, image: np.ndarray) -> None:
@@ -144,11 +156,20 @@ class Serial5InchBackend(OutputBackend):
         payload, hash_value = self._encode_image(prepared)
 
         with self._lock:
-            if self.cfg.send_only_on_change and hash_value == self._current_hash:
-                self.last_send_result = "skip_same_hash"
-                return
+            if self.cfg.send_only_on_change:
+                if hash_value == self._current_hash:
+                    self.last_send_result = "skip_same_hash"
+                    return
+                if hash_value == self._pending_hash:
+                    self.last_send_result = "skip_pending_same_hash"
+                    return
+                if hash_value == self._last_enqueued_hash and not self.connected:
+                    self.last_send_result = "skip_duplicate_while_disconnected"
+                    return
+
             self._pending_payload = payload
             self._pending_hash = hash_value
+            self._last_enqueued_hash = hash_value
             self._event.set()
 
     def _send_loop(self) -> None:
@@ -168,6 +189,9 @@ class Serial5InchBackend(OutputBackend):
                 continue
 
             if not self.connected and not self.connect():
+                with self._lock:
+                    self._pending_payload = payload
+                    self._pending_hash = hash_value
                 continue
 
             ok = self._send_payload(payload, hash_value)
@@ -179,6 +203,10 @@ class Serial5InchBackend(OutputBackend):
                 self.send_events += 1
             else:
                 self.last_send_result = "send_failed"
+                with self._lock:
+                    if self._pending_payload is None:
+                        self._pending_payload = payload
+                        self._pending_hash = hash_value
 
     def _send_payload(self, payload: bytes, hash_value: str) -> bool:
         if self.serial_client is None:
@@ -209,9 +237,11 @@ class Serial5InchBackend(OutputBackend):
                 return True
             except Exception as exc:
                 self.last_error = str(exc)
-                LOGGER.exception("Serial send error")
                 self.connected = False
-                self.reconnect()
+                self.disconnect()
+                self._next_connect_allowed = time.monotonic() + self.cfg.connect_retry_sec
+                self._log_connect_error_once(exc, self.cfg.serial_port)
+                return False
 
         return False
 
@@ -261,3 +291,17 @@ class Serial5InchBackend(OutputBackend):
             p for p in ports if any(k in (p.description or "").lower() for k in ("ch340", "cp210", "usb serial", "arduino"))
         ]
         return (preferred[0] if preferred else ports[0]).device
+
+    def _log_connect_error_once(self, exc: Exception, port: str) -> None:
+        signature = f"{type(exc).__name__}:{exc}"
+        if signature == self._last_error_signature:
+            return
+        self._last_error_signature = signature
+
+        text = str(exc)
+        if "PermissionError" in text or "拒绝访问" in text:
+            LOGGER.warning("Serial port %s busy or access denied. Close other app and retry.", port)
+        elif "FileNotFoundError" in text or "系统找不到指定的文件" in text:
+            LOGGER.warning("Serial port %s not found. Check cable and COM number.", port)
+        else:
+            LOGGER.exception("Failed to connect serial backend")

@@ -155,6 +155,7 @@ class App:
                 image_format=self.cfg.image_format,
                 handshake_enabled=self.cfg.handshake_enabled,
                 connect_on_startup=self.cfg.connect_on_startup,
+                connect_retry_sec=self.cfg.serial_connect_retry_sec,
             )
             backend = Serial5InchBackend(serial_cfg)
         else:
@@ -173,6 +174,7 @@ class App:
             cfg=OutputManagerConfig(
                 stable_frames_required=self.cfg.stable_frames_required,
                 switch_cooldown_sec=self.cfg.switch_cooldown_sec,
+                idle_resend_sec=self.cfg.idle_resend_sec,
                 map_name=self.cfg.map_name,
                 team_name=self.cfg.team_name,
             ),
@@ -217,7 +219,7 @@ class App:
             )
             self.serial_status_var.set(
                 f"serial_status: {runtime.get('status')} | port: {runtime.get('port', '-') } | "
-                f"send_events: {runtime.get('send_events', 0)}"
+                f"send_events: {runtime.get('send_events', 0)} | err: {runtime.get('last_error', '')[:36]}"
             )
 
         self.ui_fps = self.ui_fps_counter.tick()
