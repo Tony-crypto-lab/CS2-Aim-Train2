@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import logging
 import tkinter as tk
-from pathlib import Path
 from tkinter import ttk
 from typing import Optional
 
@@ -11,6 +11,17 @@ from PIL import Image, ImageTk
 from capture import FPSCounter, LatestFrameStore, CaptureWorker
 from config import build_default_config
 from detector import DetectionWorker, DetectionResult, TutorialImageCache
+from display_renderer import DisplayRenderer, RenderConfig
+from output_manager import OutputManager, OutputManagerConfig
+from second_screen_window import SecondMonitorBackend, SecondScreenConfig
+from serial_5inch_backend import Serial5InchBackend, Serial5InchConfig
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+LOGGER = logging.getLogger(__name__)
 
 
 class App:
@@ -38,10 +49,14 @@ class App:
         self.root = tk.Tk()
         self.root.title(self.cfg.title)
         self.root.geometry(f"{self.cfg.window_width}x{self.cfg.window_height}")
-        self.root.minsize(980, 680)
+        self.root.minsize(1000, 700)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        self.output_backend = None
+        self.output_manager: Optional[OutputManager] = None
+
         self._build_layout()
+        self._rebuild_output_backend()
 
     def _build_layout(self) -> None:
         self.root.columnconfigure(0, weight=1)
@@ -81,12 +96,95 @@ class App:
         self.center_preview_label = ttk.Label(roi_frame)
         self.center_preview_label.grid(row=1, column=1, pady=4)
 
-        ttk.Label(right, text="副屏教学内容（缓存+变化更新）").pack(anchor="w")
-        self.tutorial_label = ttk.Label(right)
-        self.tutorial_label.pack(anchor="w", pady=(4, 10))
+        ttk.Label(right, text="输出控制 / 5寸屏调试").pack(anchor="w")
+        controls = ttk.Frame(right)
+        controls.pack(fill="x", pady=(4, 8))
+
+        ttk.Label(controls, text="输出模式").grid(row=0, column=0, sticky="w")
+        self.output_mode_var = tk.StringVar(value=self.cfg.output_mode)
+        self.output_mode_combo = ttk.Combobox(
+            controls,
+            textvariable=self.output_mode_var,
+            values=("second_monitor", "serial_5inch"),
+            state="readonly",
+            width=20,
+        )
+        self.output_mode_combo.grid(row=0, column=1, sticky="ew", padx=4)
+        self.output_mode_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_mode_change())
+
+        ttk.Label(controls, text="COM").grid(row=1, column=0, sticky="w")
+        self.serial_port_var = tk.StringVar(value=self.cfg.serial_port)
+        ttk.Entry(controls, textvariable=self.serial_port_var, width=20).grid(row=1, column=1, sticky="ew", padx=4)
+
+        ttk.Label(controls, text="Baud").grid(row=2, column=0, sticky="w")
+        self.baud_var = tk.StringVar(value=str(self.cfg.baud_rate))
+        ttk.Entry(controls, textvariable=self.baud_var, width=20).grid(row=2, column=1, sticky="ew", padx=4)
+
+        btns = ttk.Frame(right)
+        btns.pack(fill="x", pady=6)
+        ttk.Button(btns, text="Connect", command=self._connect_serial).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
+        ttk.Button(btns, text="Reconnect", command=self._reconnect_serial).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
+        ttk.Button(btns, text="Send Idle", command=self._send_idle).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
+        ttk.Button(btns, text="Send Test Pattern", command=self._send_test).grid(row=1, column=1, padx=2, pady=2, sticky="ew")
+        ttk.Button(btns, text="Send Current Lineup", command=self._send_current_lineup).grid(
+            row=2, column=0, padx=2, pady=2, sticky="ew"
+        )
+        ttk.Button(btns, text="Resend Current", command=self._resend_current).grid(row=2, column=1, padx=2, pady=2, sticky="ew")
 
         self.detect_var = tk.StringVar(value="area: unknown | point: unknown")
-        ttk.Label(right, textvariable=self.detect_var, font=("Consolas", 12)).pack(anchor="w")
+        self.output_status_var = tk.StringVar(value="backend: unknown")
+        self.serial_status_var = tk.StringVar(value="serial: disconnected")
+
+        ttk.Label(right, textvariable=self.detect_var, font=("Consolas", 12)).pack(anchor="w", pady=(6, 2))
+        ttk.Label(right, textvariable=self.output_status_var).pack(anchor="w")
+        ttk.Label(right, textvariable=self.serial_status_var).pack(anchor="w")
+
+    def _build_output_manager(self) -> OutputManager:
+        mode = self.output_mode_var.get().strip() or "second_monitor"
+        self.cfg.output_mode = mode
+
+        if mode == "serial_5inch":
+            serial_cfg = Serial5InchConfig(
+                serial_port=self.serial_port_var.get().strip(),
+                baud_rate=int(self.baud_var.get().strip() or self.cfg.baud_rate),
+                timeout=self.cfg.serial_timeout,
+                retry_count=self.cfg.serial_retry_count,
+                screen_width=self.cfg.screen_width,
+                screen_height=self.cfg.screen_height,
+                send_only_on_change=self.cfg.send_only_on_change,
+                image_format=self.cfg.image_format,
+                handshake_enabled=self.cfg.handshake_enabled,
+                connect_on_startup=self.cfg.connect_on_startup,
+            )
+            backend = Serial5InchBackend(serial_cfg)
+        else:
+            second_cfg = SecondScreenConfig(
+                enabled=self.cfg.second_monitor_enabled,
+                width=self.cfg.screen_width,
+                height=self.cfg.screen_height,
+            )
+            backend = SecondMonitorBackend(self.root, second_cfg)
+
+        renderer = DisplayRenderer(RenderConfig(width=self.cfg.screen_width, height=self.cfg.screen_height))
+        manager = OutputManager(
+            backend=backend,
+            renderer=renderer,
+            tutorial_cache=self.tutorial_cache,
+            cfg=OutputManagerConfig(
+                stable_frames_required=self.cfg.stable_frames_required,
+                switch_cooldown_sec=self.cfg.switch_cooldown_sec,
+                map_name=self.cfg.map_name,
+                team_name=self.cfg.team_name,
+            ),
+        )
+        return manager
+
+    def _rebuild_output_backend(self) -> None:
+        if self.output_manager is not None:
+            self.output_manager.close()
+
+        self.output_manager = self._build_output_manager()
+        self.output_manager.initialize()
 
     def run(self) -> None:
         self.capture_worker.start()
@@ -109,6 +207,18 @@ class App:
         if result is not None:
             self._update_roi_preview(result)
             self._update_tutorial_if_changed(result)
+
+        if self.output_manager is not None:
+            self.output_manager.update_from_detection(result)
+            runtime = self.output_manager.runtime_status()
+            self.output_status_var.set(
+                f"backend: {runtime.get('backend')} | last_hash: {runtime.get('last_hash', '')[:8]} | "
+                f"last: {runtime.get('last_send_result', '-') }"
+            )
+            self.serial_status_var.set(
+                f"serial_status: {runtime.get('status')} | port: {runtime.get('port', '-') } | "
+                f"send_events: {runtime.get('send_events', 0)}"
+            )
 
         self.ui_fps = self.ui_fps_counter.tick()
         self.fps_var.set(
@@ -150,8 +260,6 @@ class App:
         if img is None:
             img = self._build_fallback_tutorial(key)
 
-        preview = cv2.resize(img, (360, 220), interpolation=cv2.INTER_AREA)
-        self._set_label_image(self.tutorial_label, preview)
         self._last_tutorial_key = key
 
     @staticmethod
@@ -164,9 +272,7 @@ class App:
 
     @staticmethod
     def _build_fallback_tutorial(key: str):
-        canvas = cv2.imread(str(Path(__file__).parent / "assets" / "fallback.png"))
-        if canvas is None:
-            canvas = 255 * (cv2.UMat(220, 360, cv2.CV_8UC3).get())
+        canvas = 255 * (cv2.UMat(220, 360, cv2.CV_8UC3).get())
         cv2.putText(canvas, "No tutorial asset", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (30, 30, 30), 2)
         cv2.putText(canvas, key, (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 80, 150), 2)
         return canvas
@@ -179,10 +285,52 @@ class App:
         label.configure(image=tk_im)
         label.image = tk_im
 
+    def _on_mode_change(self) -> None:
+        self._rebuild_output_backend()
+
+    def _connect_serial(self) -> None:
+        if self.output_manager is None:
+            return
+        backend = self.output_manager.backend
+        if isinstance(backend, Serial5InchBackend):
+            backend.cfg.serial_port = self.serial_port_var.get().strip()
+            backend.cfg.baud_rate = int(self.baud_var.get().strip() or backend.cfg.baud_rate)
+            backend.connect()
+        else:
+            self.status_var.set("当前不是 serial_5inch 模式")
+
+    def _reconnect_serial(self) -> None:
+        if self.output_manager is None:
+            return
+        backend = self.output_manager.backend
+        if isinstance(backend, Serial5InchBackend):
+            backend.reconnect()
+
+    def _send_idle(self) -> None:
+        if self.output_manager is not None:
+            self.output_manager.show_idle(status="MANUAL_IDLE")
+
+    def _send_test(self) -> None:
+        if self.output_manager is not None:
+            self.output_manager.send_test_pattern()
+
+    def _send_current_lineup(self) -> None:
+        if self.output_manager is None:
+            return
+        result = self.det_worker.get_latest_result()
+        self.output_manager.update_from_detection(result)
+
+    def _resend_current(self) -> None:
+        if self.output_manager is not None:
+            self.output_manager.resend_current()
+
     def _on_close(self) -> None:
+        LOGGER.info("Stopping app")
         self.status_var.set("状态: 正在停止")
         self.capture_worker.stop()
         self.det_worker.stop()
+        if self.output_manager is not None:
+            self.output_manager.close()
         self.root.destroy()
 
 

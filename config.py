@@ -6,8 +6,6 @@ from pathlib import Path
 
 @dataclass(slots=True)
 class AppConfig:
-    """Runtime configuration for CS2 visual assistant."""
-
     window_width: int = 1200
     window_height: int = 800
     title: str = "CS2 Vision Trainer Console"
@@ -23,6 +21,25 @@ class AppConfig:
     full_preview_size: tuple[int, int] = (420, 236)
     minimap_preview_size: tuple[int, int] = (256, 256)
     center_preview_size: tuple[int, int] = (320, 240)
+
+    output_mode: str = "second_monitor"
+    second_monitor_enabled: bool = True
+
+    serial_port: str = ""
+    baud_rate: int = 921600
+    serial_timeout: float = 1.0
+    serial_retry_count: int = 2
+    screen_width: int = 800
+    screen_height: int = 480
+    send_only_on_change: bool = True
+    image_format: str = "jpg"
+    handshake_enabled: bool = False
+    connect_on_startup: bool = False
+
+    stable_frames_required: int = 3
+    switch_cooldown_sec: float = 0.8
+    map_name: str = "DE_DUST2"
+    team_name: str = "T"
 
     assets_dir: Path = Path("assets")
     tutorial_dir: Path = Path("assets/tutorial")
